@@ -1,0 +1,66 @@
+# @package _global_
+# Unitree real-robot upper-body config for DreamZero Wan2.2 5B.
+# Temporal alignment follows Agibot/30FPS data, not DROID/20FPS:
+# - raw video/action/control: 30 FPS
+# - video sampling: 30 FPS -> 5 FPS via 6-frame spacing
+# - num_frames: 33 (set by train script)
+# - action_horizon / action chunk: 48
+
+
+defaults:
+  - dreamzero/base_48_wan_fine_aug_relative
+  - _self_
+
+# Per-view resize. DreamTransform composes three views into a 2x2 Agibot-style
+# grid, so the model receives 640x352 before the Wan2.2 target resize.
+image_resolution_width: 320
+image_resolution_height: 176
+
+max_state_dim: 64
+max_action_dim: 32
+use_global_metadata: false
+relative_action: true
+relative_action_per_horizon: false
+relative_action_keys:
+  - left_ee_pose_gripper_base
+  - right_ee_pose_gripper_base
+max_chunk_size: 4
+dataset_shard_sampling_rate: 0.1
+mixture_dataset_cls: groot.vla.data.dataset.lerobot_sharded.ShardedLeRobotMixtureDataset.from_mixture_spec
+single_dataset_cls: groot.vla.data.dataset.lerobot_sharded.ShardedLeRobotPaddedLangActionChunkDatasetUnitree
+
+unitree_0415_organize_stationery_data_root: /DATA/disk3/yuhangwang/data/Depth/raw/unitree_3tasks_v2.1/0415/organize_stationery
+unitree_0415_water_plant_data_root: /DATA/disk3/yuhangwang/data/Depth/raw/unitree_3tasks_v2.1/0415/water_plant
+unitree_0415_collect_eggs_data_root: /DATA/disk3/yuhangwang/data/Depth/raw/unitree_3tasks_v2.1/0415/collect_eggs
+unitree_0508_collect_eggs_data_root: /DATA/disk3/yuhangwang/data/Depth/raw/unitree_3tasks_v2.1/0508/collect_eggs
+
+train_dataset:
+  _target_: ${mixture_dataset_cls}
+  _convert_: object
+  mixture_spec:
+    - dataset_path:
+        unitree_g1_upper_body:
+          - ${unitree_0415_organize_stationery_data_root}
+          - ${unitree_0415_water_plant_data_root}
+          - ${unitree_0415_collect_eggs_data_root}
+          - ${unitree_0508_collect_eggs_data_root}
+      dataset_weight: 1.0
+      distribute_weights: true
+
+  dataset_class: ${single_dataset_cls}
+  all_modality_configs: ${modality_configs}
+  all_transforms: ${transforms}
+  metadata_versions: ${metadata_versions}
+  fps: ${fps}
+  dataset_kwargs:
+    video_backend: decord
+    use_global_metadata: ${use_global_metadata}
+    max_chunk_size: ${max_chunk_size}
+    relative_action: ${relative_action}
+    relative_action_keys: ${relative_action_keys}
+    relative_action_per_horizon: ${relative_action_per_horizon}
+  mixture_kwargs:
+    training: true
+    balance_dataset_weights: false
+    seed: 42
+    shard_sampling_rate: ${dataset_shard_sampling_rate}

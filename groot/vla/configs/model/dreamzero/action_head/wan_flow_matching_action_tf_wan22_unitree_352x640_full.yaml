@@ -1,0 +1,24 @@
+# @package _global_
+# Unitree Wan2.2 5B from-Wan initialization, full DiT fine-tune.
+# The action/state encoder and action decoder are randomly initialized by CausalWanModel
+# because pretrained_model_path remains null in the launch script; only Wan2.2 DiT,
+# Wan2.2 VAE, Wan2.2 T5, and Wan2.1 CLIP image encoder are loaded.
+
+defaults:
+  - wan_flow_matching_action_tf_wan22
+  - _self_
+
+train_architecture: full
+load_pretrained_det_decode_layer_path: null
+
+# Final model input HxW=352x640 (i.e. WxH=640x352).
+# VAE38 latent: 22x40; DiT patch stride (1,2,2): 11x20 tokens/frame.
+frame_seqlen: 220
+
+action_head_cfg:
+  config:
+    target_video_height: 352
+    target_video_width: 640
+    skip_component_loading: false
+    defer_lora_injection: false
+    torch_compile_dit_blocks: true
