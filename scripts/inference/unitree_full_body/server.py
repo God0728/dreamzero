@@ -2,17 +2,24 @@
 """Websocket inference server for Unitree full-body DreamZero checkpoints.
 
 The server keeps the DreamZero policy loaded, maintains a short RGB frame
-history for each camera, and serves 53-D Unitree full-body action chunks:
+history for each camera, and serves 60-D Unitree full-body action chunks
+(matching ``dataset/meta/modality.json`` ``end=60``)::
 
-    robot_q_desired[:29] + hand_cmd[:12] + ee_state[:12]
+    robot_q_desired[:36] + hand_cmd[:12] + ee_state[:12]
+      robot_q_desired = base_pose(7) + robot joints(29)
+
+The floating base (``robot_q[:7]``) is not executable on a real robot, so the
+response also exposes ``robot_joint_cmd`` (the 29 actuated joints) and a
+base-stripped 53-D ``control`` vector ``= joints(29) + hand(12) + ee_state(12)``.
 
 Client messages use msgpack-numpy and follow the same endpoint convention as
-``eval_utils.policy_server``:
+``eval_utils.policy_server``::
 
     {"endpoint": "infer", "color_0": HWC uint8, "color_2": HWC uint8,
-     "color_3": HWC uint8, "state": (53,), "prompt": "..."}
+     "color_3": HWC uint8, "state": (60,) or (53,), "prompt": "..."}
 
-The response contains ``action`` with shape ``[action_horizon, 53]`` and,
+A 53-D base-stripped state is accepted and zero-padded back to 60-D internally.
+The response contains ``action`` with shape ``[action_horizon, 60]`` and,
 optionally, decoded ``pred_video`` frames.
 """
 
@@ -48,10 +55,20 @@ CLIENT_IMAGE_ALIASES = {
 }
 STATE_KEY = "state.sweep_floor_control"
 ACTION_KEY = "action.sweep_floor_control"
-ACTION_DIM = 53
-ROBOT_Q_DIM = 29
+# Full-body 60-D control layout (matches dataset/meta/modality.json end=60):
+#   [0:36]  robot_q   = base_pose(7) + robot joints(29)
+#   [36:48] hand      = left hand(6) + right hand(6)
+#   [48:60] ee_state  = left  xyzrpy(6) + right xyzrpy(6)
+ACTION_DIM = 60
+ROBOT_Q_DIM = 36
 HAND_DIM = 12
 EE_DIM = 12
+# The floating base (robot_q[0:7]) is not executable on a real robot, so the
+# executable joint command is robot_q_desired[BASE_DIM:ROBOT_Q_DIM] (29 DOF) and
+# the base-stripped "control" vector is 53-D = 29 joints + 12 hand + 12 ee_state.
+BASE_DIM = 7
+JOINT_DIM = ROBOT_Q_DIM - BASE_DIM  # 29 actuated body joints
+CONTROL_DIM = JOINT_DIM + HAND_DIM + EE_DIM  # 53
 
 
 def _maybe_init_dist(timeout_seconds: int = 600) -> None:
@@ -103,12 +120,25 @@ def _as_rgb_frame(value: Any, *, key: str, color_order: str) -> np.ndarray:
 
 
 def _as_state(value: Any) -> np.ndarray:
+    """Normalize an incoming state into the model's 60-D layout.
+
+    Accepts either the full 60-D state (base_pose + joints + hand + ee) or a
+    base-stripped 53-D state (joints + hand + ee).  In the 53-D case the missing
+    floating-base block is zero-filled because the model uses relative actions and
+    the base is never executed on the real robot.
+    """
     arr = np.asarray(value, dtype=np.float32).reshape(-1)
-    if arr.size < ACTION_DIM:
-        raise ValueError(f"state must have at least {ACTION_DIM} values, got {arr.size}")
-    if not np.isfinite(arr[:ACTION_DIM]).all():
+    if arr.size >= ACTION_DIM:
+        arr = arr[:ACTION_DIM]
+    elif arr.size == CONTROL_DIM:
+        arr = np.concatenate([np.zeros(BASE_DIM, dtype=np.float32), arr], axis=0)
+    else:
+        raise ValueError(
+            f"state must have {ACTION_DIM} (full) or {CONTROL_DIM} (base-stripped) values, got {arr.size}"
+        )
+    if not np.isfinite(arr).all():
         raise ValueError("state contains non-finite values")
-    return arr[:ACTION_DIM].reshape(1, ACTION_DIM)
+    return arr.reshape(1, ACTION_DIM)
 
 
 def _find_first(obs: dict[str, Any], keys: tuple[str, ...]) -> Any:
@@ -222,11 +252,15 @@ class UnitreeFullBodyPolicyServer:
             "state_key": "state or state.sweep_floor_control",
             "action_key": ACTION_KEY,
             "action_dim": ACTION_DIM,
+            "control_dim": CONTROL_DIM,
             "action_layout": {
                 "robot_q_desired": [0, ROBOT_Q_DIM],
+                "base_pose": [0, BASE_DIM],
+                "robot_joint_cmd": [BASE_DIM, ROBOT_Q_DIM],
                 "hand_cmd": [ROBOT_Q_DIM, ROBOT_Q_DIM + HAND_DIM],
                 "ee_state": [ROBOT_Q_DIM + HAND_DIM, ACTION_DIM],
             },
+            "executable_keys": ["robot_joint_cmd", "hand_cmd"],
             "action_horizon": self.args.action_horizon,
             "video_stride": self.args.video_stride,
             "eval_mode": self.args.eval_mode,
@@ -299,14 +333,21 @@ class UnitreeFullBodyPolicyServer:
             self.last_latent_video = video_pred.detach()
         self.request_index += 1
 
+        robot_q_desired = action[:, :ROBOT_Q_DIM]
+        robot_joint_cmd = action[:, BASE_DIM:ROBOT_Q_DIM]
+        hand_cmd = action[:, ROBOT_Q_DIM : ROBOT_Q_DIM + HAND_DIM]
+        ee_state = action[:, ROBOT_Q_DIM + HAND_DIM : ACTION_DIM]
         response: dict[str, Any] = {
             "ok": True,
             "request_index": self.request_index,
             "action": action,
             ACTION_KEY: action,
-            "robot_q_desired": action[:, :ROBOT_Q_DIM],
-            "hand_cmd": action[:, ROBOT_Q_DIM : ROBOT_Q_DIM + HAND_DIM],
-            "ee_state": action[:, ROBOT_Q_DIM + HAND_DIM : ACTION_DIM],
+            "robot_q_desired": robot_q_desired,
+            "robot_joint_cmd": robot_joint_cmd,
+            "hand_cmd": hand_cmd,
+            "ee_state": ee_state,
+            # Base-stripped 53-D control vector the real robot actually consumes.
+            "control": np.concatenate([robot_joint_cmd, hand_cmd, ee_state], axis=1),
         }
         if self.args.return_video:
             pred_video = _decode_video(self.policy, video_pred)
@@ -384,7 +425,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--client-image-color-order", choices=["rgb", "bgr"], default="rgb")
     parser.add_argument(
         "--t5-cache-dir",
-        default="/mnt/unitree_cpfs/ruixuan/cache/dreamzero/t5_cache/unitree_sweep_floor_100eps",
+        default="/mnt/raid0/dreamzero_models/t5_cache/unitree_stack_blocks_50eps",
     )
     parser.add_argument("--tokenizer-path-override", default=None)
     parser.add_argument("--model-config-override", action="append", default=[])

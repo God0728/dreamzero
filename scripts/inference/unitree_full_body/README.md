@@ -7,11 +7,15 @@
 
 ```text
 server.py
-  常驻 websocket 推理服务，加载 DreamZero checkpoint，接收图像/state/prompt，返回 48-step action chunk。
+  常驻 websocket 推理服务，加载 DreamZero checkpoint，接收图像/state/prompt，返回 48-step 的 60D action chunk。
 
 client_viser.py
   LeRobot/GEAR 数据集重放客户端，发送 color_0/color_2/color_3 和低维 state，
   使用 viser + scripts/inference/assets 里的 URDF 显示预测关节动作、输入图像和预测图像。
+
+client_real_robot.py
+  真机推理客户端。从机器人读取三路相机 + 60D state，双缓冲预取下一段 chunk，
+  控制线程按固定频率平滑下发完整 36D robot_q（base7 + 29 关节）+ 12 手部命令（不阻塞于推理延迟）。
 ```
 
 ## Server
@@ -137,10 +141,14 @@ http://localhost:8081
     "color_0": np.ndarray(H, W, 3),  # head camera, RGB uint8
     "color_2": np.ndarray(H, W, 3),  # left wrist, RGB uint8
     "color_3": np.ndarray(H, W, 3),  # right wrist, RGB uint8
-    "state": np.ndarray(53 or 60,),  # robot_q_current + hand_state + ee_state
+    "state": np.ndarray(60,),        # robot_q_current[:36] + hand_state[:12] + ee_state[:12]
     "prompt": "<task instruction>",
 }
 ```
+
+`state` 规范格式是 60D（与训练 `dataset/meta/modality.json` 的 `end=60` 一致）。
+也接受 53D 的去 base 版本（29 关节 + 12 手 + 12 ee），server 会在前面补 7 维零
+还原成 60D（base 用相对动作，不参与真机执行）。
 
 也可以用模型 key：
 
@@ -156,12 +164,14 @@ state.sweep_floor_control
 ```python
 {
     "ok": True,
-    "action": np.ndarray(48, 53 or 60),
-    "action.sweep_floor_control": np.ndarray(48, 53 or 60),
-    "robot_q_desired": np.ndarray(48, 29 or 36),
-    "hand_cmd": np.ndarray(48, 12),
-    "ee_state": np.ndarray(48, 12),
-    "pred_video": np.ndarray(T, H, W, 3),  # 只有 --return-video 时存在
+    "action": np.ndarray(48, 60),          # 完整 60D = robot_q_desired[:36] + hand_cmd[:12] + ee_state[:12]
+    "action.sweep_floor_control": np.ndarray(48, 60),
+    "robot_q_desired": np.ndarray(48, 36),  # base_pose(7) + 29 关节
+    "robot_joint_cmd": np.ndarray(48, 29),  # 去 base 的 29 actuated 关节（真机直接执行）
+    "hand_cmd": np.ndarray(48, 12),         # 左手 6 + 右手 6（真机直接执行）
+    "ee_state": np.ndarray(48, 12),         # 仅信息用，不执行
+    "control": np.ndarray(48, 53),          # 去 base 的 53D = 29 关节 + 12 手 + 12 ee
+    "pred_video": np.ndarray(T, H, W, 3),   # 只有 --return-video 时存在
 }
 ```
 
@@ -170,30 +180,21 @@ state.sweep_floor_control
 把 relative delta 加回绝对量。因此 client/viser 端不要再手动加 state，直接把
 `robot_q_desired` 解释为绝对 root pose + body 关节命令，把 `hand_cmd` 解释为反归一化后的手部命令。
 
-模型返回的 `robot_q_desired` 在 Viser 里按 root pose + body command 解释：
+模型返回的 60D `action` 规范布局（与 `datasetinfo.md` / `dataset/meta/modality.json` 一致）：
 
 ```text
-robot_q_desired[0:3]   = root xyz
-robot_q_desired[3:7]   = root wxyz
-robot_q_desired[7:29]  = 机器人 29DOF URDF 的前 22 个 actuated body DOF
-robot_q_desired[29:36] = pad/unused，如果存在则忽略
+[0:36]   robot_q_desired = base_pose(7) + 29 关节
+  [0:3]    root xyz
+  [3:7]    root wxyz
+  [7:36]   29 actuated body 关节 = 腿(12) + 腰(3) + 双臂(14)
+[36:48]  hand_cmd = 左手(6) + 右手(6)
+[48:60]  ee_state = 左 xyzrpy(6) + 右 xyzrpy(6)（仅信息用）
 ```
 
-53D action layout：
+真机执行：完整 `robot_q_desired[0:36]`（base7 + 29 关节）整体喂给 WBC `SecureMotionInferencer`（与遥操喂 GMR raw_qpos 一致，base 不能用固定值）+ `hand_cmd`（12）下发手部；`ee_state`（12）仅信息用、不执行。
 
-```text
-[0:29]   robot_q_desired = xyz + wxyz + body22
-[29:41]  hand_cmd
-[41:53]  ee_state
-```
-
-60D action layout：
-
-```text
-[0:36]   robot_q_desired = xyz + wxyz + body22 + pad7
-[36:48]  hand_cmd
-[48:60]  ee_state
-```
+Viser 可视化是另一回事：URDF 只画出 body 前 22 个 actuated DOF，所以 viser 内部只取
+`robot_q_desired[7:29]` 画到 URDF，剩余关节保持默认值。这是可视化选择，不是动作维度的真实划分。
 
 ## Viser 可视化映射
 
@@ -242,14 +243,66 @@ viser web 端会显示并随 playback 更新：
 
 ## 真实机器人客户端接入
 
-真实机器人侧只需要替换 `client_viser.py` 中的数据集读取部分，保持发给 server 的字段一致：
+直接用 `client_real_robot.py`（双缓冲预取，推理延迟不阻塞控制）：
+
+```bash
+# 先用 dummy 机器人验证整条链路（无硬件）：
+.venv/bin/python scripts/inference/unitree_full_body/client_real_robot.py \
+  --host 127.0.0.1 --port 8000 \
+  --prompt "stack the blocks" \
+  --robot dummy \
+  --control-hz 30 \
+  --action-horizon 48 \
+  --replan-stride 24
+```
+
+接入真机直接用 `--robot unitree_g1`。`UnitreeG1RobotInterface` 已对接遥操采集栈
+`/home/unitree/jimmy/wbc_pico_record`（即录制 60D 训练数据的同一套代码），并通过
+`unitree_sdk2py` DDS 驱动机器人：
+
+```bash
+.venv/bin/python scripts/inference/unitree_full_body/client_real_robot.py \
+  --host 127.0.0.1 --port 8000 \
+  --prompt "stack the blocks" \
+  --robot unitree_g1 \
+  --net-interface enp5s0 \
+  --eef brainco \
+  --image-server-address 192.168.123.164 \
+  --wbc-repo /home/unitree/jimmy/wbc_pico_record \
+  --control-hz 30 --action-horizon 48 --replan-stride 24
+```
+
+数据流（与录制脚本一一对应）：
 
 ```text
-color_0 -> 头部相机左侧
+相机   : ZMQ ImageClient -> color_0(头部左目) / color_2(左腕) / color_3(右腕)
+state  : rt/lowstate LowState(29 关节 + IMU) + 手部状态 + FK 末端 -> 60D
+机器人 out: robot_q_desired[0:36](base7+关节29) -> WBC SecureMotionInferencer(zero-rotation 校准) -> rt/fsm/teleop/cmd(FSM 504)
+手   out: hand_cmd(12) -> 手控制器 set_hand_targets
+```
+
+要点：
+* 29 关节顺序 = 腿(12) + 腰(3) + 左臂(7) + 右臂(7)，与 `datasetinfo.md` robot_q[7:36] 一致。
+* base(7) 用固定站立位姿喂给 WBC（按部署约定只执行 29 关节），ee_state(12) 不执行。
+* IMU 四元数按"相对第一帧"变换（与录制 `_apply_recording_transform_to_quat` 一致），匹配训练分布。
+* WBC 推理线程按 `--wbc-rate-hz`(默认 60Hz) 跟踪最新 setpoint，与控制频率解耦。
+* `reset()` 切到 FSM 504 并启动 WBC 线程；`close()` 切回 FSM 801 并松手。
+
+如需接入其它机器人，实现 `RobotInterface` 三个方法即可，保持发给 server 的字段一致：
+
+```text
+color_0 -> 头部相机左目
 color_2 -> 腕部左侧
 color_3 -> 腕部右侧
-state   -> robot_q_current[:29] + hand_state[:12] + ee_state[:12]
+state   -> robot_q_current[:36] + hand_state[:12] + ee_state[:12]   # 60D
 ```
+
+* `read_observation()`：返回三路 RGB 帧 + 60D state。
+* `command_joints_hand(joint_cmd_29, hand_cmd_12)`：下发一个 setpoint。
+
+推理与控制解耦：后台推理线程在当前 chunk 还在播放时预取下一段，控制线程按
+`--control-hz` 平滑输出；`--replan-stride` 控制每执行多少步后切换到新 chunk。
+若新 chunk 未就绪，控制线程保持最后一个 setpoint，不会跳变。
 
 server 内部会维护 `action_horizon + 1` 帧历史，并按 `video_stride=6` 取窗口：
 
@@ -258,3 +311,9 @@ server 内部会维护 `action_horizon + 1` 帧历史，并按 `video_stride=6` 
 ```
 
 开头历史不足时会用第一帧补齐。
+
+
+# system.set_fsm(504) #进入遥操模式   system.set_fsm(801)进入走跑模式
+
+
+raw_qpos: GMR 重映射得到的 qpos (36维: pos(3) + quat(4) + joints(29))

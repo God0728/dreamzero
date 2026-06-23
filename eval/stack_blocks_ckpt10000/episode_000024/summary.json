@@ -1,0 +1,45 @@
+{
+  "episode_id": 24,
+  "episode_length": 829,
+  "num_chunks": 18,
+  "prompt": "Stack the blocks in the order of red, green and yellow",
+  "metrics": {
+    "action_mse": 0.007654850836843252,
+    "action_mae": 0.037746161222457886,
+    "action_group_mse": {
+      "base_pose": 3.2011073926696554e-05,
+      "robot_q": 0.002922840416431427,
+      "hand": 0.026801928877830505,
+      "ee_state": 0.004390124697238207
+    },
+    "video_mae": 0.04260677099227905,
+    "video_psnr": 19.404944076749157,
+    "video_frames": 139
+  },
+  "artifacts": {
+    "actions_npz": "/mnt/raid0/dreamzero_eval/stack_blocks_ckpt10000/episode_000024/actions.npz",
+    "action_plot": "/mnt/raid0/dreamzero_eval/stack_blocks_ckpt10000/episode_000024/action_pred_vs_gt.png",
+    "pred_video_mp4": "/mnt/raid0/dreamzero_eval/stack_blocks_ckpt10000/episode_000024/pred_video.mp4",
+    "pred_video_frames_npy": "/mnt/raid0/dreamzero_eval/stack_blocks_ckpt10000/episode_000024/pred_video_frames.npy",
+    "video_compare_mp4": "/mnt/raid0/dreamzero_eval/stack_blocks_ckpt10000/episode_000024/video_pred_gt_side_by_side.mp4"
+  },
+  "config": {
+    "eval_mode": "open_loop",
+    "action_horizon": 48,
+    "video_stride": 6,
+    "preprocess": {
+      "center_crop_scale": 0.95,
+      "resize_hw": [
+        176,
+        320
+      ]
+    },
+    "model_config_override": [
+      "action_head_cfg.config.load_text_encoder=false",
+      "action_head_cfg.config.torch_compile_dit_blocks=false",
+      "text_embedding_cache_dir=/mnt/raid0/dreamzero_models/t5_cache/unitree_stack_blocks_50eps",
+      "require_text_embedding_cache=true",
+      "text_embedding_cache_runtime=model"
+    ]
+  }
+}

@@ -84,3 +84,28 @@ bash scripts/train/unitree_stack_blocks_train_wan22_320x176_v0-1.sh
 
 dataset格式 7d state_base_pose + 29d robot_joint_q +12d ee_pos +12d hand_q 
 
+MASTER_PORT=29617 python scripts/eval_unitree_stack_blocks_episode_stream.py \
+  --model-path /mnt/raid0/dreamzero_checkpoints/unitree_stack_blocks_wan22_320x176_v0.1_0616_50eps_run2/checkpoint-8000 \
+  --dataset-path dataset/stack_blocks_lerobot_gear_50eps \
+  --output-dir /mnt/raid0/dreamzero_eval/stack_blocks_ckpt8000 \
+  --episode-ids 0 \
+  --device cuda:7 \
+  --action-horizon 48 \
+  --video-stride 6 \
+  --video-fps 5
+
+
+mkdir -p /home/unitree/jimmy/dreamzero/eval 
+sudo mount --bind /mnt/raid0/dreamzero_eval /home/unitree/jimmy/dreamzero/eval  && findmnt /home/unitree/jimmy/dreamzero/eval 
+
+
+
+
+推理
+
+MASTER_PORT=29617 .venv/bin/python scripts/inference/unitree_full_body/server.py \
+  --host 0.0.0.0 --port 8000 \
+  --model-path checkpoints/<你的60D checkpoint> \
+  --device cuda:0 --prompt "stack the blocks" \
+  --action-horizon 48 --video-stride 6 \
+  --eval-mode causal_gt --return-video

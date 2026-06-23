@@ -207,8 +207,9 @@ class RotaryPositionEmbeddingNoPolarOp(nn.Module):
         return torch.cat([freqs_cos_3d, freqs_sin_3d], dim=0)
 
     def post_initialize(self):
+        target_device = torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu")
         self.freqs = {
-            key: (value[0].to("cuda"), value[1].to("cuda")) for key, value in self.freqs.items()
+            key: (value[0].to(target_device), value[1].to(target_device)) for key, value in self.freqs.items()
         }
 
 
@@ -246,7 +247,8 @@ class RotaryPositionEmbeddingWithPolarOp(nn.Module):
         return freqs
 
     def post_initialize(self):
-        self.freqs = {key: value.to(device="cuda") for key, value in self.freqs.items()}
+        target_device = torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu")
+        self.freqs = {key: value.to(device=target_device) for key, value in self.freqs.items()}
 
 
 class AttentionModule(nn.Module):
