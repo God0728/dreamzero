@@ -103,6 +103,14 @@ def _mapping_value(embodiment_tag_mapping: dict[str, int], tag: EmbodimentTag) -
     return embodiment_tag_mapping.get(tag.value)
 
 
+def _tag_matches(value: Any, tag: EmbodimentTag) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, EmbodimentTag):
+        return value == tag
+    return str(value) == tag.value
+
+
 def normalize_language_item(item: Any) -> str:
     """Match the historical collator's language literal handling."""
     try:
@@ -141,6 +149,7 @@ def format_dreamzero_prompt(
     embodiment_id: int,
     num_views: int,
     embodiment_tag_mapping: dict[str, int],
+    embodiment_tag: EmbodimentTag | str | None = None,
 ) -> str:
     """Build the exact prompt string used before T5 encoding.
 
@@ -152,11 +161,25 @@ def format_dreamzero_prompt(
     lower_item = processed_item.lower()
     embodiment_id = _embodiment_id(embodiment_id)
 
+    if _tag_matches(embodiment_tag, EmbodimentTag.UNITREE_G1_UPPER_BODY) and num_views <= 1:
+        return (
+            "A single view video shows that a robot "
+            + lower_item
+            + " The view shows the camera view from the robot's head. The robot "
+            + lower_item
+        )
     if num_views > 1 and embodiment_id == _mapping_value(embodiment_tag_mapping, EmbodimentTag.AGIBOT):
         return (
             "A multi-view video shows that a robot "
             + lower_item
             + " The video is split into four views: The top-left view shows the camera view from the robot's head, the top-right view shows the camera view from the right hand, the bottom-left view shows the camera view from the left hand, and the bottom-right view is a black screen (inactive view). The robot "
+            + lower_item
+        )
+    if num_views <= 1 and embodiment_id == _mapping_value(embodiment_tag_mapping, EmbodimentTag.UNITREE_G1_UPPER_BODY):
+        return (
+            "A single view video shows that a robot "
+            + lower_item
+            + " The view shows the camera view from the robot's head. The robot "
             + lower_item
         )
     if embodiment_id == _mapping_value(embodiment_tag_mapping, EmbodimentTag.OXE_DROID):
@@ -355,9 +378,13 @@ class DreamTransform(InvertibleModalityTransform):
             cache_tag=self.text_embedding_cache_tag,
         )
         if not os.path.exists(cache_path):
+            prompt_preview = prompt.replace("\n", "\\n")
+            if len(prompt_preview) > 1200:
+                prompt_preview = prompt_preview[:1200] + "...<truncated>"
             raise FileNotFoundError(
                 f"Missing DreamZero text embedding cache: {cache_path}. "
-                "Run scripts/data/precompute_t5_text_embeddings.py with the same prompt/config first."
+                "Run scripts/data/precompute_t5_text_embeddings.py with the same prompt/config first. "
+                f"prompt_preview={prompt_preview!r}"
             )
         return cache_path
 
@@ -683,6 +710,7 @@ class DreamTransform(InvertibleModalityTransform):
             embodiment_id=self.get_embodiment_tag(),
             num_views=self.num_views,
             embodiment_tag_mapping=self.embodiment_tag_mapping,
+            embodiment_tag=self.embodiment_tag,
         )
         cache_path = self._text_embedding_cache_path_for_prompt(prompt_for_cache)
         if cache_path is not None:

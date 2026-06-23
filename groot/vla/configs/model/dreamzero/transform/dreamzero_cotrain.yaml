@@ -44,6 +44,7 @@ model_specific_transform:
   max_length: ${max_length}
   state_horizon: ${state_horizon}
   action_horizon: ${action_horizon}
+  num_views: ${num_views}
   embodiment_tag_mapping: ${embodiment_tag_to_projector_index}
   tokenizer_path: ${tokenizer_path}
   text_embedding_cache_dir: ${text_embedding_cache_dir}

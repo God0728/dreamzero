@@ -1,0 +1,125 @@
+# @package _global_
+# Unitree collect-blocks-into-basket 1camera-camera0 真机数据集配置(DreamZero Wan2.2 5B)。
+# 转换后的数据使用单一 60-D state/action key:
+#   robot_q[:36] + hand[:12] + ee_state[:12]
+# 其中 robot_q[:36] = floating base 7D + G1 全身 29 关节。
+# 因此虽然沿用历史 embodiment 名称 unitree_g1_upper_body，实际训练目标是 full-body 60D。
+
+defaults:
+  - /data/dreamzero/base_48_wan_fine_aug_relative
+  - _self_
+
+image_resolution_width: 512
+image_resolution_height: 384
+
+max_state_dim: 64
+max_action_dim: 64
+use_global_metadata: false
+relative_action: true
+relative_action_per_horizon: false
+relative_action_keys:
+  - sweep_floor_control
+max_chunk_size: 4
+dataset_shard_sampling_rate: 0.1
+mixture_dataset_cls: groot.vla.data.dataset.lerobot_sharded.ShardedLeRobotMixtureDataset.from_mixture_spec
+single_dataset_cls: groot.vla.data.dataset.lerobot_sharded.ShardedLeRobotPaddedLangActionChunkDatasetUnitree
+
+# 转换脚本会生成 train/ 和 val/。训练默认只使用 train/，避免把最后一条 val episode 混进训练。
+# 当前配置只训练 camera0: video.head_stereo_left / observation.images.color_0。
+# 单张 camera0 resize 到 384x512，不再拼 2x2 多视角 composite。
+collect_blocks_data_root: /mnt/raid0/jimmy/gear_format/walk_to_table_put_cups_and_rack_plates_in_dishwasher_lerobot_gear/train
+
+modality_config_unitree_g1_upper_body:
+  video:
+    _target_: groot.vla.data.dataset.ModalityConfig
+    delta_indices: ${unitree_video_delta_indices}
+    eval_delta_indices: [0]
+    modality_keys:
+      - video.head_stereo_left
+  state:
+    _target_: groot.vla.data.dataset.ModalityConfig
+    delta_indices: [0]
+    modality_keys:
+      - state.sweep_floor_control
+  action:
+    _target_: groot.vla.data.dataset.ModalityConfig
+    delta_indices: ${unitree_action_delta_indices}
+    modality_keys:
+      - action.sweep_floor_control
+  language:
+    _target_: groot.vla.data.dataset.ModalityConfig
+    delta_indices: [0]
+    modality_keys:
+      - annotation.task
+
+transform_unitree_g1_upper_body:
+  _target_: groot.vla.data.transform.ComposedModalityTransform
+  transforms:
+    - _target_: groot.vla.data.transform.VideoToTensor
+      apply_to: ${modality_config_unitree_g1_upper_body.video.modality_keys}
+    - _target_: groot.vla.data.transform.VideoCrop
+      apply_to: ${modality_config_unitree_g1_upper_body.video.modality_keys}
+      scale: 0.95
+      mode: random
+    - _target_: groot.vla.data.transform.VideoResize
+      apply_to: ${modality_config_unitree_g1_upper_body.video.modality_keys}
+      height: ${image_resolution_height}
+      width: ${image_resolution_width}
+      interpolation: linear
+    - _target_: groot.vla.data.transform.VideoColorJitter
+      apply_to: ${modality_config_unitree_g1_upper_body.video.modality_keys}
+      brightness: 0.3
+      contrast: 0.4
+      saturation: 0.5
+      hue: 0.08
+    - _target_: groot.vla.data.transform.VideoToNumpy
+      apply_to: ${modality_config_unitree_g1_upper_body.video.modality_keys}
+
+    - _target_: groot.vla.data.transform.StateActionToTensor
+      apply_to: ${modality_config_unitree_g1_upper_body.state.modality_keys}
+    - _target_: groot.vla.data.transform.StateActionTransform
+      apply_to: ${modality_config_unitree_g1_upper_body.state.modality_keys}
+      normalization_modes:
+        state.sweep_floor_control: q99
+
+    - _target_: groot.vla.data.transform.StateActionToTensor
+      apply_to: ${modality_config_unitree_g1_upper_body.action.modality_keys}
+    - _target_: groot.vla.data.transform.StateActionTransform
+      apply_to: ${modality_config_unitree_g1_upper_body.action.modality_keys}
+      normalization_modes:
+        action.sweep_floor_control: q99
+
+    - _target_: groot.vla.data.transform.ConcatTransform
+      video_concat_order: ${modality_config_unitree_g1_upper_body.video.modality_keys}
+      state_concat_order: ${modality_config_unitree_g1_upper_body.state.modality_keys}
+      action_concat_order: ${modality_config_unitree_g1_upper_body.action.modality_keys}
+
+    - ${model_specific_transform}
+
+train_dataset:
+  _target_: ${mixture_dataset_cls}
+  _convert_: object
+  mixture_spec:
+    - dataset_path:
+        unitree_g1_upper_body:
+          - ${collect_blocks_data_root}
+      dataset_weight: 1.0
+      distribute_weights: true
+
+  dataset_class: ${single_dataset_cls}
+  all_modality_configs: ${modality_configs}
+  all_transforms: ${transforms}
+  metadata_versions: ${metadata_versions}
+  fps: ${fps}
+  dataset_kwargs:
+    video_backend: decord
+    use_global_metadata: ${use_global_metadata}
+    max_chunk_size: ${max_chunk_size}
+    relative_action: ${relative_action}
+    relative_action_keys: ${relative_action_keys}
+    relative_action_per_horizon: ${relative_action_per_horizon}
+  mixture_kwargs:
+    training: true
+    balance_dataset_weights: false
+    seed: 42
+    shard_sampling_rate: ${dataset_shard_sampling_rate}

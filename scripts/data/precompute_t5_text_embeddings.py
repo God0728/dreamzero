@@ -125,6 +125,7 @@ def _collect_prompts(cfg: DictConfig) -> list[str]:
                         embodiment_id=embodiment_id,
                         num_views=num_views,
                         embodiment_tag_mapping=mapping,
+                        embodiment_tag=embodiment_name,
                     )
                 )
     return sorted(prompts)

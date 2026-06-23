@@ -138,13 +138,39 @@ http://localhost:8081
 ```python
 {
     "endpoint": "infer",
-    "color_0": np.ndarray(H, W, 3),  # head camera, RGB uint8
-    "color_2": np.ndarray(H, W, 3),  # left wrist, RGB uint8
-    "color_3": np.ndarray(H, W, 3),  # right wrist, RGB uint8
+    "color_0": np.ndarray(H, W, 3) or np.ndarray(T, H, W, 3),  # head, RGB uint8
+    "color_2": np.ndarray(H, W, 3) or np.ndarray(T, H, W, 3),  # left wrist
+    "color_3": np.ndarray(H, W, 3) or np.ndarray(T, H, W, 3),  # right wrist
     "state": np.ndarray(60,),        # robot_q_current[:36] + hand_state[:12] + ee_state[:12]
     "prompt": "<task instruction>",
 }
 ```
+
+首个请求可以发送单帧 HWC。后续请求推荐由客户端从真实相机缓存中按
+`0, 6, ..., 48` 预采样并直接发送 THWC；server 会把 THWC 视为已经采样好的
+时间窗口，不会丢弃前面的帧，也不会再次应用 `video_stride`。旧客户端继续发送
+HWC 时，server 仍保留原有的服务端 history/padding 兼容路径。
+
+为了降低网络传输量，也可以把每路图像发送为逐帧 JPEG：
+
+```python
+{
+    "encoding": "jpeg",
+    "frames": [jpeg_bytes_0, jpeg_bytes_1, ...],  # 首次1帧，后续推荐9帧
+}
+```
+
+JPEG 可以通过 msgpack 直接传输为 bytes。server 使用 OpenCV 解码并统一转换为
+RGB。若客户端已经执行与 checkpoint 一致的 `0.95` center-crop 和
+`resize(width=320, height=176)`，启动 server 时增加：
+
+```bash
+--client-preprocessed-images
+```
+
+该选项会跳过云端的 VideoCrop、VideoResize 和 VideoColorJitter，防止重复预处理。
+如果客户端只做 JPEG 编码、仍保留原始分辨率，则不要添加这个选项，云端会继续
+执行 checkpoint 中的图像预处理。
 
 `state` 规范格式是 60D（与训练 `dataset/meta/modality.json` 的 `end=60` 一致）。
 也接受 53D 的去 base 版本（29 关节 + 12 手 + 12 ee），server 会在前面补 7 维零

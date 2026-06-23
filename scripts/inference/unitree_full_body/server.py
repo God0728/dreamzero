@@ -104,15 +104,52 @@ def _reset_action_head_state(policy: Any) -> None:
 
 
 def _as_rgb_frame(value: Any, *, key: str, color_order: str) -> np.ndarray:
-    arr = np.asarray(value)
-    if arr.ndim == 4:
-        arr = arr[-1]
-    if arr.ndim != 3 or arr.shape[-1] not in (1, 3, 4):
+    """Decode/convert one HWC frame or a pre-sampled THWC window to RGB.
+
+    A THWC request is already sampled by the real-time client and must remain a
+    temporal window.  In particular, do not collapse it to ``arr[-1]``: doing so
+    silently discards all but the newest frame. JPEG payloads use the form
+    ``{"encoding": "jpeg", "frames": [bytes, ...]}``; OpenCV decodes JPEG as
+    BGR, which is converted to RGB here independently of ``color_order``.
+    """
+    decoded_jpeg = isinstance(value, dict) and str(value.get("encoding", "")).lower() in {"jpg", "jpeg"}
+    if decoded_jpeg:
+        import cv2
+
+        encoded_frames = value.get("frames")
+        if isinstance(encoded_frames, (bytes, bytearray, memoryview)):
+            encoded_frames = [encoded_frames]
+        if not isinstance(encoded_frames, (list, tuple)) or not encoded_frames:
+            raise ValueError(f"{key} JPEG payload must contain a non-empty 'frames' list")
+        if len(encoded_frames) > 64:
+            raise ValueError(f"{key} JPEG payload has too many frames: {len(encoded_frames)}")
+
+        frames = []
+        for index, encoded in enumerate(encoded_frames):
+            if not isinstance(encoded, (bytes, bytearray, memoryview, np.ndarray)):
+                raise ValueError(f"{key} JPEG frame {index} must be bytes or uint8 ndarray")
+            data = np.frombuffer(encoded, dtype=np.uint8) if not isinstance(encoded, np.ndarray) else np.asarray(encoded, dtype=np.uint8).reshape(-1)
+            frame_bgr = cv2.imdecode(data, cv2.IMREAD_COLOR)
+            if frame_bgr is None:
+                raise ValueError(f"{key} JPEG frame {index} failed to decode")
+            frames.append(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
+        arr = frames[0] if len(frames) == 1 else np.stack(frames, axis=0)
+    elif isinstance(value, dict):
+        raise ValueError(f"{key} unsupported encoded image payload: encoding={value.get('encoding')!r}")
+    else:
+        arr = np.asarray(value)
+
+    if arr.ndim not in (3, 4) or arr.shape[-1] not in (1, 3, 4):
         raise ValueError(f"{key} must be HWC or THWC image data, got shape={arr.shape}")
+    if arr.ndim == 4 and arr.shape[0] < 1:
+        raise ValueError(f"{key} THWC image window must contain at least one frame, got shape={arr.shape}")
     if arr.dtype != np.uint8:
         arr = np.clip(arr, 0, 255).astype(np.uint8)
     arr = np.ascontiguousarray(arr[..., :3])
-    if color_order.lower() == "bgr":
+    if decoded_jpeg:
+        # cv2.imdecode() output was explicitly converted from BGR to RGB above.
+        pass
+    elif color_order.lower() == "bgr":
         arr = arr[..., ::-1].copy()
     elif color_order.lower() != "rgb":
         raise ValueError(f"Unsupported image color order {color_order!r}")
@@ -230,7 +267,7 @@ class UnitreeFullBodyPolicyServer:
             model_config_overrides=overrides,
             tokenizer_path_override=args.tokenizer_path_override,
             skip_assert_delta_indices=True,
-            skip_img_transform=False,
+            skip_img_transform=bool(args.skip_img_transform),
         )
         self.policy.trained_model.action_head.cfg_scale = float(args.cfg_scale)
         self.args = args
@@ -264,6 +301,8 @@ class UnitreeFullBodyPolicyServer:
             "action_horizon": self.args.action_horizon,
             "video_stride": self.args.video_stride,
             "eval_mode": self.args.eval_mode,
+            "client_preprocessed_images": bool(self.args.skip_img_transform),
+            "jpeg_payload": {"encoding": "jpeg", "frames": "list[bytes]"},
         }
 
     def reset(self, _: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -290,13 +329,23 @@ class UnitreeFullBodyPolicyServer:
         return np.stack(window, axis=0)
 
     def _build_model_obs(self, obs: dict[str, Any]) -> dict[str, Any]:
+        request_windows: dict[str, np.ndarray] = {}
         for model_key, aliases in CLIENT_IMAGE_ALIASES.items():
-            frame = _as_rgb_frame(
+            image = _as_rgb_frame(
                 _find_first(obs, aliases),
                 key=model_key,
                 color_order=self.args.client_image_color_order,
             )
-            self.histories[model_key].append(frame)
+            if image.ndim == 4:
+                # THWC is an already sampled client-side temporal window (for
+                # example offsets 0,6,...,48). Pass it through unchanged rather
+                # than treating its frames as dense 30 Hz history and applying
+                # video_stride a second time. Keep only its newest frame in the
+                # legacy history so a later HWC request can still fall back.
+                request_windows[model_key] = image[0] if image.shape[0] == 1 else image
+                self.histories[model_key].append(image[-1])
+            else:
+                self.histories[model_key].append(image)
 
         state_value = obs.get(STATE_KEY, obs.get("state"))
         if state_value is None:
@@ -307,7 +356,7 @@ class UnitreeFullBodyPolicyServer:
 
         model_obs = {STATE_KEY: _as_state(state_value), "annotation.task_index": prompt}
         for key in VIDEO_KEYS:
-            model_obs[key] = self._video_window(key)
+            model_obs[key] = request_windows[key] if key in request_windows else self._video_window(key)
         return model_obs
 
     def infer(self, obs: dict[str, Any]) -> dict[str, Any]:
@@ -423,6 +472,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cfg-scale", type=float, default=1.0)
     parser.add_argument("--return-video", action="store_true")
     parser.add_argument("--client-image-color-order", choices=["rgb", "bgr"], default="rgb")
+    parser.add_argument(
+        "--skip-img-transform",
+        "--client-preprocessed-images",
+        dest="skip_img_transform",
+        action="store_true",
+        help=(
+            "Client already applied the checkpoint image crop/resize. For this checkpoint, send "
+            "176x320 frames after a 0.95 center crop. Skips server VideoCrop/VideoResize/VideoColorJitter."
+        ),
+    )
     parser.add_argument(
         "--t5-cache-dir",
         default="/mnt/raid0/dreamzero_models/t5_cache/unitree_stack_blocks_50eps",

@@ -1,0 +1,20 @@
+# @package _global_
+# Unitree Wan2.2 5B, single-camera 384x512 full DiT fine-tune.
+# 384x512 keeps the original 4:3 aspect ratio and uses dimensions divisible by
+# 32. WanVideoVAE38 latent: 24x32; DiT patch stride (1,2,2): 12x16=192 tokens/frame.
+
+defaults:
+  - wan_flow_matching_action_tf_wan22
+  - _self_
+
+train_architecture: full
+load_pretrained_det_decode_layer_path: null
+frame_seqlen: 192
+
+action_head_cfg:
+  config:
+    target_video_height: 384
+    target_video_width: 512
+    skip_component_loading: false
+    defer_lora_injection: false
+    torch_compile_dit_blocks: true

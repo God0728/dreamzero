@@ -33,6 +33,7 @@ mkdir -p /home/unitree/jimmy/dreamzero/checkpoints/umt5-xxl
 sudo mount --bind /mnt/raid0/dreamzero_models/umt5-xxl /home/unitree/jimmy/dreamzero/checkpoints/umt5-xxl && findmnt /home/unitree/jimmy/dreamzero/checkpoints/umt5-xxl
 
 
+
 执行T5预计算
 
 bash scripts/train/precompute_T5_cache_unitree_stack_blocks.sh
@@ -84,11 +85,11 @@ bash scripts/train/unitree_stack_blocks_train_wan22_320x176_v0-1.sh
 
 dataset格式 7d state_base_pose + 29d robot_joint_q +12d ee_pos +12d hand_q 
 
-MASTER_PORT=29617 python scripts/eval_unitree_stack_blocks_episode_stream.py \
-  --model-path /mnt/raid0/dreamzero_checkpoints/unitree_stack_blocks_wan22_320x176_v0.1_0616_50eps_run2/checkpoint-8000 \
+MASTER_PORT=29617  python scripts/eval_unitree_stack_blocks_episode_stream.py \
+  --model-path /mnt/raid0/dreamzero_checkpoints/unitree_stack_blocks_wan22_320x176_v0.1_0616_50eps_run2/checkpoint-50000 \
   --dataset-path dataset/stack_blocks_lerobot_gear_50eps \
-  --output-dir /mnt/raid0/dreamzero_eval/stack_blocks_ckpt8000 \
-  --episode-ids 0 \
+  --output-dir /mnt/raid0/dreamzero_eval/stack_blocks_ckpt50000 \
+  --episode-ids 45 \
   --device cuda:7 \
   --action-horizon 48 \
   --video-stride 6 \
@@ -102,10 +103,59 @@ sudo mount --bind /mnt/raid0/dreamzero_eval /home/unitree/jimmy/dreamzero/eval  
 
 
 推理
+云端
 
-MASTER_PORT=29617 .venv/bin/python scripts/inference/unitree_full_body/server.py \
+CUDA_VISIBLE_DEVICES=7 MASTER_PORT=29617 python scripts/inference/unitree_full_body/server.py \
   --host 0.0.0.0 --port 8000 \
-  --model-path checkpoints/<你的60D checkpoint> \
-  --device cuda:0 --prompt "stack the blocks" \
+  --model-path /mnt/raid0/dreamzero_checkpoints/unitree_stack_blocks_wan22_320x176_v0.1_0616_50eps_run2/checkpoint-50000 \
+  --device cuda:0 --prompt "Stack the blocks in the order of red, green and yellow" \
   --action-horizon 48 --video-stride 6 \
-  --eval-mode causal_gt --return-video
+  --eval-mode causal_gt \  --client-preprocessed-images
+
+
+
+ssh g1开启服务
+cd /home/unitree/jimmy/wbc_pico_record
+bash check.sh
+
+bash G1_setup.sh 启动手+图像 
+python image_server/image_server.py
+
+本地电脑
+
+.venv/bin/python scripts/inference/unitree_full_body/client_real_robot.py \
+  --host 10.0.8.192 \
+  --port 8000 \
+  --prompt "Stack the blocks in the order of red, green and yellow" \
+  --robot unitree_g1 \
+  --net-interface enp5s0 \
+  --eef brainco \
+  --image-server-address 192.168.123.164 \
+  --wbc-repo /home/unitree/wbc_pico_record \
+  --control-hz 30 \
+  --action-horizon 48 \
+  --replan-stride 24
+
+
+
+task2 walk_to_table_put_cups_and_rack_plates_in_dishwasher_lerobot_gear_162eps  
+
+保留1eps用于验证
+
+mkdir dataset/walk_to_table_put_cups_and_rack_plates_in_dishwasher_lerobot_gear_162eps
+sudo mount --bind /mnt/raid0/jimmy/gear_format/walk_to_table_put_cups_and_rack_plates_in_dishwasher_lerobot_gear /home/unitree/jimmy/dreamzero/dataset/walk_to_table_put_cups_and_rack_plates_in_dishwasher_lerobot_gear_162eps && findmnt /home/unitree/jimmy/dreamzero/dataset/walk_to_table_put_cups_and_rack_plates_in_dishwasher_lerobot_gear_162eps
+
+训练
+PYTHON_EXEC=/home/unitree/miniconda3/envs/dreamzero/bin/python \
+bash scripts/train/precompute_T5_cache_unitree_collect_blocks_1camera_camera0_384x512.sh
+
+tmux new -s dz_run2
+CUDA_VISIBLE_DEVICES=1,2,3,4,5 \
+REPORT_TO=wandb \
+MAX_STEPS=50000 \
+SAVE_STRATEGY=steps SAVE_STEPS=2000 \
+DATALOADER_NUM_WORKERS=0 DATALOADER_PIN_MEMORY=false \
+OUTPUT_DIR=/mnt/raid0/unitree_collect_blocks_1camera_camera0_train_wan22_384x512_v0-1_0623_162eps_run1 \
+NUM_GPUS=5 \
+PYTHON_EXEC=/home/unitree/miniconda3/envs/dreamzero/bin/python \
+bash scripts/train/unitree_collect_blocks_1camera_camera0_train_wan22_384x512_v0-1.sh

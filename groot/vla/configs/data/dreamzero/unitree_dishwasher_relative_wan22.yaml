@@ -1,0 +1,11 @@
+# @package _global_
+# Deprecated compatibility alias.
+# Use data=dreamzero/unitree_collect_blocks_1camera_camera0_relative_wan22.
+
+defaults:
+  - /data/dreamzero/unitree_collect_blocks_1camera_camera0_relative_wan22
+  - _self_
+
+# Backward-compatible override name for old launch commands.
+dishwasher_data_root: /mnt/raid0/jimmy/gear_format/walk_to_table_put_cups_and_rack_plates_in_dishwasher_lerobot_gear/train
+collect_blocks_data_root: ${dishwasher_data_root}
